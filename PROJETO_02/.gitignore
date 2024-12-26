@@ -1,0 +1,4 @@
+venv
+database.json
+__pycache__
+.vscode
