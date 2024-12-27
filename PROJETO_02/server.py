@@ -9,13 +9,13 @@ database = {
     "users": [
         {
             # Password is "123"
-            'email': 'user1@test.com',
+            'username': 'user',
             'password': '$argon2id$v=19$m=65536,t=3,p=4$A5t3cz+HjiTjdy87p7+ASg$uOEVli8zhv2LBo5YohIDq412kL+jCkIONGOsTR4kNs4',
             'session_token': '01234567890123456789012345678901'
         },
         {
             # Password is "123"
-            'email': 'user2@test.com',
+            'username': 'user2',
             'password': '$argon2id$v=19$m=65536,t=3,p=4$A5t3cz+HjiTjdy87p7+ASg$uOEVli8zhv2LBo5YohIDq412kL+jCkIONGOsTR4kNs4',
             'session_token': '01234567890123456789012345678902'
         }
@@ -27,6 +27,7 @@ class Server:
     host = '127.0.0.1'
     tcp_port = 8080
     udp_port = 8081
+    udp_clients = []
 
     def start(self):
         tcp_thread = threading.Thread(target=self.start_tcp_server)
@@ -86,10 +87,12 @@ class Server:
 
         decoded_request = data_buffer.decode('utf-8')
 
+        print(f'Received TCP from {addr}:\n{decoded_request}')
+
         try:
             header, body = decoded_request.split('\r\n\r\n', 1)
             method, path, _ = header.split(' ', 2)
-        except ValueError:
+        except:
             print('Invalid request')
 
         # Route the request
@@ -110,9 +113,45 @@ class Server:
         client_socket.close()
 
     def handle_udp_packet(self, data: bytes, addr):
-        print(f'Received UDP from {addr}: {data.decode()}')
+        decoded_data = data.decode()
 
-        self.udp_socket.sendto(data, addr)
+        print()
+        print(f'Received UDP from {addr}: {decoded_data}')
+
+        request: dict = json.loads(data)
+        if (type(request) is not dict):
+            request = json.loads(request)
+        if (type(request) is not dict):
+            print(type(request))
+            print(request)
+            print("Invalid request")
+
+        print(addr)
+
+        valid, user = self.valid_token(request.get("token"))
+
+        if not valid:
+            print("Invalid token")
+            return
+
+        message: str = request.get("message")
+        target_user: str = request.get("to")
+
+        target = next(
+            (client for client in self.udp_clients if client["user"]
+             ["username"] == target_user), None
+        )
+
+        if target is None:
+            print("Target user not found")
+            return
+
+        json_msg = json.dumps({
+            "from": user["username"],
+            "message": message
+        })
+
+        self.udp_socket.sendto(json_msg.encode(), target["address"])
 
     def wrap_response(self, status_code: int, content_type: str, body: str):
         return f"HTTP/1.1 {status_code} OK\r\nContent-Type: {content_type}\r\n\r\n{body}"
@@ -123,15 +162,17 @@ class Server:
     def login(self, body: str):
         data: dict = json.loads(body)
 
-        email: str = data.get("email")
+        username: str = data.get("username")
         password: str = data.get("password")
+        client_udp_port: int = data.get("udp_port")
+        client_host: str = data.get("host")
 
-        if email is None or password is None:
-            return self.wrap_response(400, 'text/plain', 'Missing email or password')
+        if username is None or password is None:
+            return self.wrap_response(400, 'text/plain', 'Missing username or password')
 
         try:
             user = next(
-                user for user in database["users"] if user["email"] == email)
+                user for user in database["users"] if user["username"] == username)
         except StopIteration:
             return self.wrap_response(400, 'text/plain', 'User not found')
 
@@ -144,25 +185,32 @@ class Server:
         new_token = self.generate_random_string(32)
         user["session_token"] = new_token
 
+        del user["password"]
+
+        self.udp_clients.append({
+            "address": (client_host, client_udp_port),
+            "user": user
+        })
+
         return self.wrap_response(200, 'text/plain', user["session_token"])
 
     def register(self, body: str):
         data: dict = json.loads(body)
 
-        email: str = data.get("email")
+        username: str = data.get("username")
         password: str = data.get("password")
 
-        if email is None or password is None:
-            return self.wrap_response(400, 'text/plain', 'Missing email or password')
+        if username is None or password is None:
+            return self.wrap_response(400, 'text/plain', 'Missing username or password')
 
-        if any(user["email"] == email for user in database["users"]):
+        if any(user["username"] == username for user in database["users"]):
             return self.wrap_response(400, 'text/plain', 'User already exists')
 
         ph = PasswordHasher()
         hash = ph.hash(password)
 
         new_user = {
-            "email": email,
+            "username": username,
             "password": hash,
             "session_token": self.generate_random_string(32)
         }
@@ -184,7 +232,7 @@ class Server:
         if user is None:
             return False
 
-        return True
+        return True, user
 
 
 if __name__ == "__main__":
