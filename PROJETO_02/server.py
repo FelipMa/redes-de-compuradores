@@ -4,6 +4,7 @@ import json
 from argon2 import PasswordHasher, exceptions as argon2_exceptions
 import random
 import string
+import base64
 
 database = {
     "users": [
@@ -105,6 +106,12 @@ class Server:
         elif path == '/register':
             if method == 'POST':
                 response = self.register(body)
+        elif path == '/logout':
+            if method == 'POST':
+                response = self.logout(body)
+        elif path == '/upload':
+            if method == 'POST':
+                response = self.upload_file(body)
         else:
             response = self.wrap_response(404, 'text/plain', 'Not found')
 
@@ -113,45 +120,73 @@ class Server:
         client_socket.close()
 
     def handle_udp_packet(self, data: bytes, addr):
-        decoded_data = data.decode()
-
-        print()
+        decoded_data = data.decode().strip()
         print(f'Received UDP from {addr}: {decoded_data}')
 
-        request: dict = json.loads(data)
-        if (type(request) is not dict):
-            request = json.loads(request)
-        if (type(request) is not dict):
-            print(type(request))
-            print(request)
-            print("Invalid request")
+        try:
+            # Remover aspas duplas extras, se presentes
+            if decoded_data.startswith('"') and decoded_data.endswith('"'):
+                decoded_data = decoded_data[1:-1].replace('\\"', '"')
 
-        print(addr)
+            request = json.loads(decoded_data)
+            if not isinstance(request, dict):
+                raise ValueError("O dado recebido não é um JSON válido.")
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"Erro ao processar o JSON: {e}")
+            return
 
+        # Validação de token
         valid, user = self.valid_token(request.get("token"))
-
         if not valid:
             print("Invalid token")
             return
 
-        message: str = request.get("message")
-        target_user: str = request.get("to")
+        # Transferência de Arquivo
+        if request.get("file_transfer") == True:
+            filename = request.get("filename")
+            file_data: str = request.get("file_data")
+            target_user = request.get("to")
 
-        target = next(
-            (client for client in self.udp_clients if client["user"]
-             ["username"] == target_user), None
-        )
+            if filename and file_data:
+                try:
+                    file_data = base64.b64decode(file_data.encode('utf-8'))
+                    with open(f"received_server_{filename}", "wb") as file:
+                        file.write(file_data)
+                    print(f"Arquivo {filename} salvo com sucesso.")
 
-        if target is None:
-            print("Target user not found")
-            return
+                    # Encaminhar para o destinatário
+                    target = next(
+                        (client for client in self.udp_clients if client["user"]["username"] == target_user), None)
+                    if target:
+                        json_msg = json.dumps({
+                            "from": user["username"],
+                            "file_transfer": True,
+                            "filename": filename,
+                            "file_data": base64.b64encode(file_data).decode('utf-8')
+                        })
+                        self.udp_socket.sendto(
+                            json_msg.encode(), target["address"])
+                        print(
+                            f"Arquivo {filename} encaminhado para {target_user}")
+                    else:
+                        print(f"Usuário {target_user} não encontrado.")
+                except Exception as e:
+                    print(f"Erro ao processar o arquivo: {e}")
 
-        json_msg = json.dumps({
-            "from": user["username"],
-            "message": message
-        })
+        # Mensagens de Texto
+        else:
+            message = request.get("message")
+            target_user = request.get("to")
 
-        self.udp_socket.sendto(json_msg.encode(), target["address"])
+            target = next(
+                (client for client in self.udp_clients if client["user"]["username"] == target_user), None)
+            if target:
+                json_msg = json.dumps(
+                    {"from": user["username"], "message": message})
+                self.udp_socket.sendto(json_msg.encode(), target["address"])
+                print(f"Mensagem enviada para {target_user}")
+            else:
+                print("Usuário não encontrado.")
 
     def wrap_response(self, status_code: int, content_type: str, body: str):
         return f"HTTP/1.1 {status_code} OK\r\nContent-Type: {content_type}\r\n\r\n{body}"
@@ -182,15 +217,22 @@ class Server:
         except argon2_exceptions.VerifyMismatchError:
             return self.wrap_response(400, 'text/plain', 'Invalid password')
 
+        # Verifica se o número de clientes UDP já atingiu o limite de 3
+        if len(self.udp_clients) >= 3:
+            return self.wrap_response(400, 'text/plain', 'Maximum number of clients reached')
+
         new_token = self.generate_random_string(32)
         user["session_token"] = new_token
 
-        del user["password"]
+        user_without_password = user.copy()
+        del user_without_password["password"]
 
         self.udp_clients.append({
             "address": (client_host, client_udp_port),
             "user": user
         })
+
+        print("Clientes UDP ativos: ", self.udp_clients)
 
         return self.wrap_response(200, 'text/plain', user["session_token"])
 
@@ -219,6 +261,29 @@ class Server:
 
         return self.wrap_response(200, 'text/plain', new_user["session_token"])
 
+    def logout(self, body: str):
+        data: dict = json.loads(body)
+
+        token: str = data.get("token")
+
+        if token is None:
+            return self.wrap_response(400, 'text/plain', 'Missing session token')
+
+        user = next((user for user in database["users"] if user.get(
+            "session_token") == token), None)
+
+        if user is None:
+            return self.wrap_response(400, 'text/plain', 'Invalid session token')
+
+        # Remover o token de sessão do usuário
+        user["session_token"] = None
+
+        # Remover o cliente da lista UDP
+        self.udp_clients = [
+            client for client in self.udp_clients if client["user"] != user]
+
+        return self.wrap_response(200, 'text/plain', 'Logout successful')
+
     def generate_random_string(self, length):
         characters = string.ascii_letters + string.digits
         random_string = ''.join(random.choice(characters)
@@ -233,6 +298,38 @@ class Server:
             return False
 
         return True, user
+
+    def upload_file(self, body: str):
+        try:
+            # Espera que o body seja um JSON com nome de arquivo e conteúdo base64
+            data: dict = json.loads(body)
+            filename = data.get("filename")
+            file_content = data.get("content")  # Conteúdo codificado em base64
+
+            # Decodificando o conteúdo base64
+            import base64
+            file_bytes = base64.b64decode(file_content)
+
+            # Salvando o arquivo no servidor
+            with open(f"uploads/{filename}", "wb") as file:
+                file.write(file_bytes)
+
+            return self.wrap_response(200, 'text/plain', f'Arquivo {filename} recebido com sucesso.')
+
+        except Exception as e:
+            return self.wrap_response(500, 'text/plain', f'Erro ao processar o arquivo: {str(e)}')
+
+    def receive_udp_file(self, data: dict, addr):
+        filename = data.get("filename")
+        file_content = data.get("content")  # Recebe conteúdo como base64
+        import base64
+        try:
+            file_bytes = base64.b64decode(file_content)
+            with open(f"uploads/{filename}", "ab") as file:
+                file.write(file_bytes)
+            print(f"Recebido parte do arquivo {filename} de {addr}")
+        except Exception as e:
+            print(f"Erro ao receber arquivo UDP: {e}")
 
 
 if __name__ == "__main__":
