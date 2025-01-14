@@ -2,9 +2,8 @@ import socket
 import threading
 import json
 from argon2 import PasswordHasher, exceptions as argon2_exceptions
-import random
-import string
 import base64
+from crypto import Crypto
 
 database = {
     "users": [
@@ -12,13 +11,15 @@ database = {
             # Password is "123"
             'username': 'user',
             'password': '$argon2id$v=19$m=65536,t=3,p=4$A5t3cz+HjiTjdy87p7+ASg$uOEVli8zhv2LBo5YohIDq412kL+jCkIONGOsTR4kNs4',
-            'session_token': '01234567890123456789012345678901'
+            'session_token': '',
+            'crypto_key': ''
         },
         {
             # Password is "123"
             'username': 'user2',
             'password': '$argon2id$v=19$m=65536,t=3,p=4$A5t3cz+HjiTjdy87p7+ASg$uOEVli8zhv2LBo5YohIDq412kL+jCkIONGOsTR4kNs4',
-            'session_token': '01234567890123456789012345678902'
+            'session_token': '',
+            'crypto_key': ''
         }
     ]
 }
@@ -109,9 +110,10 @@ class Server:
         elif path == '/logout':
             if method == 'POST':
                 response = self.logout(body)
-        elif path == '/upload':
-            if method == 'POST':
-                response = self.upload_file(body)
+        elif path == '/online-users':
+            if method == 'GET':
+                response = self.online_users()
+
         else:
             response = self.wrap_response(404, 'text/plain', 'Not found')
 
@@ -146,13 +148,14 @@ class Server:
             filename = request.get("filename")
             file_data: str = request.get("file_data")
             target_user = request.get("to")
+            chunk_index = request.get("chunk_index")
+            total_chunks = request.get("total_chunks")
 
             if filename and file_data:
                 try:
                     file_data = base64.b64decode(file_data.encode('utf-8'))
                     with open(f"received_server_{filename}", "wb") as file:
                         file.write(file_data)
-                    print(f"Arquivo {filename} salvo com sucesso.")
 
                     # Encaminhar para o destinatário
                     target = next(
@@ -162,10 +165,14 @@ class Server:
                             "from": user["username"],
                             "file_transfer": True,
                             "filename": filename,
-                            "file_data": base64.b64encode(file_data).decode('utf-8')
+                            "file_data": base64.b64encode(file_data).decode('utf-8'),
+                            "chunk_index": chunk_index,
+                            "total_chunks": total_chunks
                         })
+
                         self.udp_socket.sendto(
                             json_msg.encode(), target["address"])
+
                         print(
                             f"Arquivo {filename} encaminhado para {target_user}")
                     else:
@@ -176,13 +183,17 @@ class Server:
         # Mensagens de Texto
         else:
             message = request.get("message")
+            iv = request.get("iv")
             target_user = request.get("to")
+
+            bytes_key = bytes.fromhex(user["crypto_key"])
+            decoded_message = Crypto(bytes_key).decrypt(iv, message)
 
             target = next(
                 (client for client in self.udp_clients if client["user"]["username"] == target_user), None)
             if target:
                 json_msg = json.dumps(
-                    {"from": user["username"], "message": message})
+                    {"from": user["username"], "message": decoded_message})
                 self.udp_socket.sendto(json_msg.encode(), target["address"])
                 print(f"Mensagem enviada para {target_user}")
             else:
@@ -201,6 +212,7 @@ class Server:
         password: str = data.get("password")
         client_udp_port: int = data.get("udp_port")
         client_host: str = data.get("host")
+        client_crypto_key: str = data.get("crypto_key")
 
         if username is None or password is None:
             return self.wrap_response(400, 'text/plain', 'Missing username or password')
@@ -221,8 +233,9 @@ class Server:
         if len(self.udp_clients) >= 3:
             return self.wrap_response(400, 'text/plain', 'Maximum number of clients reached')
 
-        new_token = self.generate_random_string(32)
+        new_token = Crypto.generate_random_string(32)
         user["session_token"] = new_token
+        user["crypto_key"] = client_crypto_key
 
         user_without_password = user.copy()
         del user_without_password["password"]
@@ -254,7 +267,8 @@ class Server:
         new_user = {
             "username": username,
             "password": hash,
-            "session_token": self.generate_random_string(32)
+            "session_token": Crypto.generate_random_string(32),
+            "crypto_key": None
         }
 
         database["users"].append(new_user)
@@ -284,11 +298,10 @@ class Server:
 
         return self.wrap_response(200, 'text/plain', 'Logout successful')
 
-    def generate_random_string(self, length):
-        characters = string.ascii_letters + string.digits
-        random_string = ''.join(random.choice(characters)
-                                for i in range(length))
-        return random_string
+    def online_users(self):
+        online_users = [client["user"]["username"]
+                        for client in self.udp_clients]
+        return self.wrap_response(200, 'application/json', json.dumps(online_users))
 
     def valid_token(self, token):
         user = next(
@@ -299,37 +312,10 @@ class Server:
 
         return True, user
 
-    def upload_file(self, body: str):
-        try:
-            # Espera que o body seja um JSON com nome de arquivo e conteúdo base64
-            data: dict = json.loads(body)
-            filename = data.get("filename")
-            file_content = data.get("content")  # Conteúdo codificado em base64
-
-            # Decodificando o conteúdo base64
-            import base64
-            file_bytes = base64.b64decode(file_content)
-
-            # Salvando o arquivo no servidor
-            with open(f"uploads/{filename}", "wb") as file:
-                file.write(file_bytes)
-
-            return self.wrap_response(200, 'text/plain', f'Arquivo {filename} recebido com sucesso.')
-
-        except Exception as e:
-            return self.wrap_response(500, 'text/plain', f'Erro ao processar o arquivo: {str(e)}')
-
-    def receive_udp_file(self, data: dict, addr):
-        filename = data.get("filename")
-        file_content = data.get("content")  # Recebe conteúdo como base64
-        import base64
-        try:
-            file_bytes = base64.b64decode(file_content)
-            with open(f"uploads/{filename}", "ab") as file:
-                file.write(file_bytes)
-            print(f"Recebido parte do arquivo {filename} de {addr}")
-        except Exception as e:
-            print(f"Erro ao receber arquivo UDP: {e}")
+    def __del__(self):
+        self.tcp_socket.close()
+        self.udp_socket.close()
+        print('Sockets closed')
 
 
 if __name__ == "__main__":
