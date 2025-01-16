@@ -41,7 +41,7 @@ class Client:
     def create_login_frame(self):
         """Cria a tela de login."""
         self.login_frame = Label(self.root)
-        self.login_frame.pack()
+        self.login_frame.pack(padx=20, pady=20)
 
         Label(self.login_frame, text="Username:").grid(
             row=0, column=0, sticky="w")
@@ -53,21 +53,25 @@ class Client:
         self.password_entry = Entry(self.login_frame, width=30, show="*")
         self.password_entry.grid(row=1, column=1)
 
-        Button(self.login_frame, text="Login", command=self.login).grid(
-            row=2, column=0, columnspan=2)
-        Button(self.login_frame, text="Registrar-se",
-               command=self.register).grid(row=3, column=0, columnspan=2)
+        # Botões lado a lado
+        login_button = Button(
+            self.login_frame, text="Login", command=self.login)
+        login_button.grid(row=2, column=0, padx=5, pady=10)
+
+        register_button = Button(
+            self.login_frame, text="Registrar-se", command=self.register)
+        register_button.grid(row=2, column=1, padx=5, pady=10)
 
         self.chat_log = Text(
-            self.login_frame, state='disabled', height=3, width=40)
-        self.chat_log.grid(row=4, column=0, columnspan=2)
+            self.login_frame, state='disabled', height=3, width=40,)
+        self.chat_log.grid(row=3, column=0, columnspan=2)
 
     def create_chat_frame(self):
         """Cria a tela principal do chat."""
         self.login_frame.destroy()
 
         self.chat_frame = Label(self.root)
-        self.chat_frame.pack()
+        self.chat_frame.pack(padx=20, pady=20)
 
         Label(self.chat_frame, text="Usuários Online:").grid(
             row=0, column=0, sticky="w")
@@ -78,19 +82,25 @@ class Client:
 
         self.chat_log = Text(
             self.chat_frame, state='disabled', height=20, width=50)
-        self.chat_log.grid(row=1, column=1, columnspan=2)
+        self.chat_log.grid(row=1, column=1, columnspan=3)
 
         Label(self.chat_frame, text="Mensagem:").grid(
             row=2, column=1, sticky="w")
         self.message_entry = Entry(self.chat_frame, width=40)
-        self.message_entry.grid(row=2, column=2)
+        self.message_entry.grid(row=2, column=2, padx=5)
 
-        Button(self.chat_frame, text="Enviar Mensagem",
-               command=self.send_message).grid(row=3, column=1, columnspan=2)
-        Button(self.chat_frame, text="Enviar Arquivo",
-               command=self.send_file).grid(row=4, column=1, columnspan=2)
-        Button(self.chat_frame, text="Logout",
-               command=self.logout).grid(row=5, column=1, columnspan=2)
+        # Botões lado a lado na tela do chat
+        send_button = Button(
+            self.chat_frame, text="Enviar Mensagem", command=self.send_message)
+        send_button.grid(row=3, column=1, padx=5, pady=10)
+
+        file_button = Button(
+            self.chat_frame, text="Enviar Arquivo", command=self.send_file)
+        file_button.grid(row=3, column=2, padx=5, pady=10)
+
+        logout_button = Button(
+            self.chat_frame, text="Logout", command=self.logout)
+        logout_button.grid(row=3, column=3, padx=5, pady=10)
 
         # Atualizar lista de usuários online
         self.update_online_users()
@@ -121,6 +131,8 @@ class Client:
         users: dict = json.loads(response["body"])
 
         self.recipient_listbox.delete(0, END)
+        self.recipient_listbox.insert(
+            END, "Global")  # Adiciona "Global" sempre
         for user in users:
             self.recipient_listbox.insert(END, user)
 
@@ -245,26 +257,38 @@ class Client:
         self.create_login_frame()
 
     def send_message(self):
-        if not self.recipient:
-            self.add_message("Erro: Selecione um destinatário.")
+        selected_recipient = self.recipient
+
+        if not selected_recipient:
+            self.add_message("Erro: Nenhum destinatário selecionado.")
             return
 
         message = self.message_entry.get().strip()
+        if not message:
+            self.add_message("Erro: Mensagem vazia.")
+            return
 
         encrypted_message = self.crypto_client.encrypt(message)
 
-        if message:
+        if selected_recipient == "Global":
             payload = {
                 "token": self.session_token,
-                "to": self.recipient,
+                "to": "all",  # Identificador para mensagem global
                 "message": encrypted_message["ciphertext"],
                 "iv": encrypted_message["iv"]
             }
-            self.udp_socket.sendto(json.dumps(payload).encode(
-            ), (self.server_host, self.server_udp_port))
-            self.add_message(f"Você para {self.recipient}: {message}")
+            self.add_message(f"Você (Mensagem Global): {message}")
         else:
-            self.add_message("Erro: Mensagem vazia.")
+            payload = {
+                "token": self.session_token,
+                "to": selected_recipient,
+                "message": encrypted_message["ciphertext"],
+                "iv": encrypted_message["iv"]
+            }
+            self.add_message(f"Você para {selected_recipient}: {message}")
+
+        self.udp_socket.sendto(json.dumps(payload).encode(
+            'utf-8'), (self.server_host, self.server_udp_port))
         self.message_entry.delete(0, END)
 
     def send_file(self):
