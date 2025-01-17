@@ -148,9 +148,9 @@ class Server:
         else:
             self.process_message(request, user)
 
-    def process_file_transfer(self, request, user):
+    def process_file_transfer(self, request: dict, user):
         filename = request.get("filename")
-        file_data = request.get("file_data")
+        file_data: str = request.get("file_data")
         target_user = request.get("to")
         chunk_index = request.get("chunk_index")
         total_chunks = request.get("total_chunks")
@@ -174,14 +174,15 @@ class Server:
                         "total_chunks": total_chunks
                     })
 
-                    self.udp_socket.sendto(json_msg.encode(), target["address"])
+                    self.udp_socket.sendto(
+                        json_msg.encode(), target["address"])
                     print(f"File {filename} forwarded to {target_user}")
                 else:
                     print(f"User {target_user} not found.")
             except Exception as e:
                 print(f"Error processing file: {e}")
 
-    def process_message(self, request, user):
+    def process_message(self, request: dict, user):
         message = request.get("message")
         iv = request.get("iv")
         target_user = request.get("to")
@@ -219,7 +220,7 @@ class Server:
     def login(self, body: str):
         try:
             # Decodificar o corpo da requisição JSON
-            data = json.loads(body)
+            data: dict = json.loads(body)
         except json.JSONDecodeError:
             return self.wrap_response(400, 'text/plain', 'Invalid JSON')
 
@@ -235,7 +236,8 @@ class Server:
             return self.wrap_response(400, 'text/plain', 'Missing fields in request')
 
         # Verificar se o usuário existe no banco de dados
-        user = next((u for u in database["users"] if u["username"] == username), None)
+        user = next(
+            (u for u in database["users"] if u["username"] == username), None)
         if not user:
             return self.wrap_response(400, 'text/plain', 'User not found')
 
